@@ -1,24 +1,56 @@
-name: Custom CI/CD for Ghost CMS (Learner Edition)
+name: Ghost CMS CI/CD Pipeline
+
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
-      - 'ghost/core/**'
+      - '**.js'
+      - '**.json'
+      - '**.yml'
       - 'Dockerfile'
+      - 'ghost/core/**'
       - 'package.json'
       - 'yarn.lock'
   pull_request:
-    branches: [main]
+    branches:
+      - main
     paths:
-      - 'ghost/core/**'
+      - '**.js'
+      - '**.json'
+      - '**.yml'
       - 'Dockerfile'
+      - 'ghost/core/**'
       - 'package.json'
       - 'yarn.lock'
   workflow_dispatch:
 
 jobs:
-  build-and-test:
+  setup:
     runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 16
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Cache yarn dependencies
+        uses: actions/cache@v2
+        with:
+          path: ~/.yarn/cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+
+  test:
+    runs-on: ubuntu-latest
+    needs: setup
     services:
       mysql:
         image: mysql:8
@@ -27,24 +59,21 @@ jobs:
           MYSQL_DATABASE: ghost_test
         ports:
           - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22.13.1
-          cache: 'yarn'
+          node-version: 16
+
       - name: Install dependencies
         run: yarn install --frozen-lockfile
-      - name: Suppress warnings
-        run: export NODE_NO_WARNINGS=1
-      - name: Run tests
+
+      - name: Run database migrations
         env:
           NODE_ENV: testing
           database__client: mysql
@@ -53,27 +82,34 @@ jobs:
           database__connection__password: testpass
           database__connection__database: ghost_test
           database__connection__port: 3306
+        run: cd ghost/core && yarn knex migrate:latest
+
+      - name: Run tests
         run: cd ghost/core && yarn test
 
   deploy:
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs: test
     if: github.ref == 'refs/heads/main'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/custom-ghost:latest
+          tags: ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
+
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -84,6 +120,15 @@ jobs:
           script: |
             cd /opt/ghost || mkdir -p /opt/ghost && cd /opt/ghost
             git pull origin main || git clone https://github.com/${{ github.repository }} .
-            docker compose pull
-            docker compose up -d --build
+            docker-compose pull
+            docker-compose up -d --build
             docker image prune -f
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+    steps:
+      - name: Send failure notification
+        run: |
+          echo "Deployment failed. Please check the CI/CD pipeline."
