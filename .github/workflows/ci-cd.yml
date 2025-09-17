@@ -42,16 +42,6 @@ jobs:
           cache: 'yarn'
       - name: Install dependencies
         run: yarn install --frozen-lockfile
-      - name: Run database migrations
-        env:
-          NODE_ENV: testing
-          database__client: mysql
-          database__connection__host: localhost
-          database__connection__user: root
-          database__connection__password: testpass
-          database__connection__database: ghost_test
-          database__connection__port: ${{ job.services.mysql.ports[3306] }}
-        run: cd ghost/core && yarn db:migrate
       - name: Suppress warnings
         run: export NODE_NO_WARNINGS=1
       - name: Run tests
@@ -62,7 +52,7 @@ jobs:
           database__connection__user: root
           database__connection__password: testpass
           database__connection__database: ghost_test
-          database__connection__port: ${{ job.services.mysql.ports[3306] }}
+          database__connection__port: 3306
         run: cd ghost/core && yarn test
 
   deploy:
