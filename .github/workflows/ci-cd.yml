@@ -36,7 +36,14 @@ jobs:
           MYSQL_DATABASE: ghost_test
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping --defaults-file=/tmp/my.cnf" --health-interval=10s --health-timeout=5s --health-retries=5
+        options: >-
+          --health-cmd="mysqladmin ping --defaults-file=/tmp/my.cnf"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+          --health-start-period=20s
+        volumes:
+          - /tmp/my.cnf:/tmp/my.cnf
 
     steps:
       - name: Checkout code
@@ -93,11 +100,9 @@ jobs:
 
       - name: Set up test environment
         run: |
-          # Create a test setup script to mock external requests
           mkdir -p ghost/core/test/utils
           cat > ghost/core/test/utils/test-setup.js << 'EOF'
           const nock = require('nock');
-          // Mock HTTP requests to prevent network errors
           nock('http://127.0.0.1:2369')
             .persist()
             .get(/.*/)
@@ -138,7 +143,6 @@ jobs:
           MAILGUN_DOMAIN: mg.example.com
           url: http://localhost:2368
         run: |
-          # Run a subset of unit tests, excluding problematic ones
           cd ghost/core && yarn test:unit --require ./test/utils/test-setup.js \
             --exclude test/unit/server/activitypub \
             --exclude test/unit/frontend/helpers/ghost_head.test.js \
@@ -179,17 +183,12 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
           script: |
-            # Create MySQL config file
             echo "[client]" > /tmp/my.cnf
             echo "user=root" >> /tmp/my.cnf
             echo "password=${{ secrets.MYSQL_ROOT_PASSWORD }}" >> /tmp/my.cnf
             chmod 600 /tmp/my.cnf
-
-            # Stop and remove existing containers if they exist
             docker stop ghost-container mysql-container || true
             docker rm ghost-container mysql-container || true
-
-            # Run MySQL container
             docker run -d \
               --name mysql-container \
               -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} \
@@ -199,8 +198,6 @@ jobs:
               -v mysql_data:/var/lib/mysql \
               --restart always \
               mysql:8
-
-            # Wait for MySQL to be ready
             for i in {1..30}; do
               if docker exec mysql-container mysqladmin ping --defaults-file=/tmp/my.cnf --silent; then
                 echo "MySQL is ready"
@@ -209,8 +206,6 @@ jobs:
               echo "Waiting for MySQL..."
               sleep 2
             done
-
-            # Run Ghost container
             docker run -d \
               --name ghost-container \
               -p 2368:2368 \
@@ -224,8 +219,6 @@ jobs:
               --link mysql-container:mysql \
               --restart always \
               ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
-
-            # Clean up unused images
             docker image prune -f
 
   notify:
