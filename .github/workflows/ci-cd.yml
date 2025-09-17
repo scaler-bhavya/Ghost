@@ -36,7 +36,7 @@ jobs:
           MYSQL_DATABASE: ghost_test
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=5
+        options: --health-cmd="mysqladmin ping -h localhost -u root -ptestpass" --health-interval=10s --health-timeout=5s --health-retries=5
 
     steps:
       - name: Checkout code
@@ -50,6 +50,17 @@ jobs:
 
       - name: Install dependencies
         run: yarn install --frozen-lockfile
+
+      - name: Wait for MySQL to be ready
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h localhost -u root -ptestpass --silent; then
+              echo "MySQL is ready"
+              break
+            fi
+            echo "Waiting for MySQL..."
+            sleep 2
+          done
 
       - name: Initialize database
         env:
@@ -74,6 +85,14 @@ jobs:
         run: cd ghost/core && yarn knex-migrator migrate
 
       - name: Run tests
+        env:
+          NODE_ENV: testing
+          database__client: mysql
+          database__connection__host: localhost
+          database__connection__user: root
+          database__connection__password: testpass
+          database__connection__database: ghost_test
+          database__connection__port: 3306
         run: cd ghost/core && yarn test
 
   deploy:
@@ -111,7 +130,7 @@ jobs:
             cd /opt/ghost
             if [ ! -f docker-compose.yml ]; then
               echo "Creating docker-compose.yml"
-              cat << EOF > docker-compose.yml
+              cat > docker-compose.yml << 'EOF'
 version: '3.8'
 services:
   ghost:
@@ -141,6 +160,8 @@ services:
       - mysql_data:/var/lib/mysql
 volumes:
   mysql_data:
+EOF
+            fi
             docker compose pull
             docker compose up -d
             docker image prune -f
@@ -148,8 +169,12 @@ volumes:
   notify:
     runs-on: ubuntu-latest
     needs: [test, deploy]
-    if: failure()
+    if: always()
     steps:
-      - name: Send failure notification
+      - name: Send notification
         run: |
-          echo "Pipeline failed. Please check the CI/CD logs."
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "Pipeline succeeded!"
+          else
+            echo "Pipeline failed. Please check the CI/CD logs."
+          fi
