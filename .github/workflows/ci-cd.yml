@@ -126,44 +126,47 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
           script: |
-            mkdir -p /opt/ghost
-            cd /opt/ghost
-            if [ ! -f docker-compose.yml ]; then
-              echo "Creating docker-compose.yml"
-              cat > docker-compose.yml << 'EOF'
-version: '3.8'
-services:
-  ghost:
-    image: ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
-    restart: always
-    ports:
-      - "2368:2368"
-    environment:
-      - database__client=mysql
-      - database__connection__host=mysql
-      - database__connection__user=ghost_user
-      - database__connection__password=${{ secrets.MYSQL_PASSWORD }}
-      - database__connection__database=ghost_prod
-      - database__connection__port=3306
-      - url=http://${{ secrets.VPS_HOST }}:2368
-    depends_on:
-      - mysql
-  mysql:
-    image: mysql:8
-    restart: always
-    environment:
-      - MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }}
-      - MYSQL_DATABASE=ghost_prod
-      - MYSQL_USER=ghost_user
-      - MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }}
-    volumes:
-      - mysql_data:/var/lib/mysql
-volumes:
-  mysql_data:
-EOF
-            fi
-            docker compose pull
-            docker compose up -d
+            # Stop and remove existing containers if they exist
+            docker stop ghost-container mysql-container || true
+            docker rm ghost-container mysql-container || true
+
+            # Run MySQL container
+            docker run -d \
+              --name mysql-container \
+              -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} \
+              -e MYSQL_DATABASE=ghost_prod \
+              -e MYSQL_USER=ghost_user \
+              -e MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }} \
+              -v mysql_data:/var/lib/mysql \
+              --restart always \
+              mysql:8
+
+            # Wait for MySQL to be ready
+            for i in {1..30}; do
+              if docker exec mysql-container mysqladmin ping -u root -p${{ secrets.MYSQL_ROOT_PASSWORD }} --silent; then
+                echo "MySQL is ready"
+                break
+              fi
+              echo "Waiting for MySQL..."
+              sleep 2
+            done
+
+            # Run Ghost container
+            docker run -d \
+              --name ghost-container \
+              -p 2368:2368 \
+              -e database__client=mysql \
+              -e database__connection__host=mysql-container \
+              -e database__connection__user=ghost_user \
+              -e database__connection__password=${{ secrets.MYSQL_PASSWORD }} \
+              -e database__connection__database=ghost_prod \
+              -e database__connection__port=3306 \
+              -e url=http://${{ secrets.VPS_HOST }}:2368 \
+              --link mysql-container:mysql \
+              --restart always \
+              ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
+
+            # Clean up unused images
             docker image prune -f
 
   notify:
