@@ -51,6 +51,17 @@ jobs:
       - name: Install dependencies
         run: yarn install --frozen-lockfile
 
+      - name: Initialize database
+        env:
+          NODE_ENV: testing
+          database__client: mysql
+          database__connection__host: localhost
+          database__connection__user: root
+          database__connection__password: testpass
+          database__connection__database: ghost_test
+          database__connection__port: 3306
+        run: cd ghost/core && yarn knex-migrator init || true
+
       - name: Run database migrations
         env:
           NODE_ENV: testing
@@ -96,7 +107,40 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
           script: |
+            mkdir -p /opt/ghost
             cd /opt/ghost
+            if [ ! -f docker-compose.yml ]; then
+              echo "Creating docker-compose.yml"
+              cat << EOF > docker-compose.yml
+version: '3.8'
+services:
+  ghost:
+    image: ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
+    restart: always
+    ports:
+      - "2368:2368"
+    environment:
+      - database__client=mysql
+      - database__connection__host=mysql
+      - database__connection__user=ghost_user
+      - database__connection__password=${{ secrets.MYSQL_PASSWORD }}
+      - database__connection__database=ghost_prod
+      - database__connection__port=3306
+      - url=http://${{ secrets.VPS_HOST }}:2368
+    depends_on:
+      - mysql
+  mysql:
+    image: mysql:8
+    restart: always
+    environment:
+      - MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }}
+      - MYSQL_DATABASE=ghost_prod
+      - MYSQL_USER=ghost_user
+      - MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }}
+    volumes:
+      - mysql_data:/var/lib/mysql
+volumes:
+  mysql_data:
             docker compose pull
             docker compose up -d
             docker image prune -f

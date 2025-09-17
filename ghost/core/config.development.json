@@ -1,3 +1,23 @@
 {
-    "enableDeveloperExperiments": true
+  "url": "http://localhost:2368",
+  "server": {
+    "port": 2368,
+    "host": "0.0.0.0"
+  },
+  "database": {
+    "client": "mysql",
+    "connection": {
+      "host": "localhost",
+      "user": "ghost_user",
+      "password": "testpass",
+      "database": "ghost_test",
+      "port": 3306
+    }
+  },
+  "mail": {
+    "transport": "Direct"
+  },
+  "logging": {
+    "transports": ["file", "stdout"]
+  }
 }
