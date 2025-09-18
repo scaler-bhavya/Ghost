@@ -2,8 +2,7 @@ name: Ghost CMS CI/CD Pipeline
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - '**.js'
       - '**.json'
@@ -13,8 +12,7 @@ on:
       - 'package.json'
       - 'yarn.lock'
   pull_request:
-    branches:
-      - main
+    branches: [main]
     paths:
       - '**.js'
       - '**.json'
@@ -27,23 +25,8 @@ on:
 
 jobs:
   test:
+    # Unit tests use sqlite3 — no MySQL service needed
     runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8
-        env:
-          MYSQL_ROOT_PASSWORD: testpass
-          MYSQL_DATABASE: ghost_test
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping --defaults-file=/tmp/my.cnf"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
-          --health-start-period=20s
-        volumes:
-          - /tmp/my.cnf:/tmp/my.cnf
 
     steps:
       - name: Checkout code
@@ -53,94 +36,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'yarn'
+          cache: yarn
 
       - name: Install dependencies
         run: yarn install --frozen-lockfile
 
-      - name: Create MySQL config file
-        run: |
-          echo "[client]" > /tmp/my.cnf
-          echo "user=root" >> /tmp/my.cnf
-          echo "password=testpass" >> /tmp/my.cnf
-          chmod 600 /tmp/my.cnf
-
-      - name: Wait for MySQL to be ready
-        run: |
-          for i in {1..30}; do
-            if mysqladmin ping --defaults-file=/tmp/my.cnf -h localhost --silent; then
-              echo "MySQL is ready"
-              break
-            fi
-            echo "Waiting for MySQL..."
-            sleep 2
-          done
-
-      - name: Initialize database
-        env:
-          NODE_ENV: testing
-          database__client: mysql
-          database__connection__host: localhost
-          database__connection__user: root
-          database__connection__password: testpass
-          database__connection__database: ghost_test
-          database__connection__port: 3306
-        run: cd ghost/core && yarn knex-migrator init || true
-
-      - name: Run database migrations
-        env:
-          NODE_ENV: testing
-          database__client: mysql
-          database__connection__host: localhost
-          database__connection__user: root
-          database__connection__password: testpass
-          database__connection__database: ghost_test
-          database__connection__port: 3306
-        run: cd ghost/core && yarn knex-migrator migrate
-
-      - name: Set up test environment
+      - name: Set up test environment (nocks)
         run: |
           mkdir -p ghost/core/test/utils
           cat > ghost/core/test/utils/test-setup.js << 'EOF'
           const nock = require('nock');
-          nock('http://127.0.0.1:2369')
-            .persist()
-            .get(/.*/)
-            .reply(200, 'Mocked response');
-          nock('http://localhost:2388')
-            .persist()
-            .get(/.*/)
-            .reply(200, 'Mocked response');
-          nock('http://www.notarealsite.com')
-            .persist()
-            .get(/.*/)
-            .reply(200, 'Mocked response');
-          nock('https://api.stripe.com')
-            .persist()
-            .get(/.*/)
-            .reply(200, { id: 'price_1', active: true, unit_amount: 500, currency: 'usd' });
-          nock('https://api.mailgun.net')
-            .persist()
-            .get(/.*/)
-            .reply(200, { items: [] });
-          nock('https://example.com')
-            .persist()
-            .get(/.*/)
-            .reply(200, { title: 'Mocked OEmbed', type: 'photo', url: 'https://example.com/image.jpg' });
+          nock('http://127.0.0.1:2369').persist().get(/.*/).reply(200, 'Mocked response');
+          nock('http://localhost:2388').persist().get(/.*/).reply(200, 'Mocked response');
+          nock('http://www.notarealsite.com').persist().get(/.*/).reply(200, 'Mocked response');
+          nock('https://api.stripe.com').persist().get(/.*/).reply(200, { id: 'price_1', active: true, unit_amount: 500, currency: 'usd' });
+          nock('https://api.mailgun.net').persist().get(/.*/).reply(200, { items: [] });
+          nock('https://example.com').persist().get(/.*/).reply(200, { title: 'Mocked OEmbed', type: 'photo', url: 'https://example.com/image.jpg' });
           EOF
 
-      - name: Run tests
+      - name: Run unit tests (sqlite3)
         env:
           NODE_ENV: testing
-          database__client: mysql
-          database__connection__host: localhost
-          database__connection__user: root
-          database__connection__password: testpass
-          database__connection__database: ghost_test
-          database__connection__port: 3306
-          STRIPE_API_KEY: sk_test_123
-          MAILGUN_API_KEY: key-123
-          MAILGUN_DOMAIN: mg.example.com
+          database__client: sqlite3
           url: http://localhost:2368
         run: |
           cd ghost/core && yarn test:unit --require ./test/utils/test-setup.js \
@@ -187,8 +104,10 @@ jobs:
             echo "user=root" >> /tmp/my.cnf
             echo "password=${{ secrets.MYSQL_ROOT_PASSWORD }}" >> /tmp/my.cnf
             chmod 600 /tmp/my.cnf
+
             docker stop ghost-container mysql-container || true
             docker rm ghost-container mysql-container || true
+
             docker run -d \
               --name mysql-container \
               -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} \
@@ -198,6 +117,7 @@ jobs:
               -v mysql_data:/var/lib/mysql \
               --restart always \
               mysql:8
+
             for i in {1..30}; do
               if docker exec mysql-container mysqladmin ping --defaults-file=/tmp/my.cnf --silent; then
                 echo "MySQL is ready"
@@ -206,6 +126,7 @@ jobs:
               echo "Waiting for MySQL..."
               sleep 2
             done
+
             docker run -d \
               --name ghost-container \
               -p 2368:2368 \
@@ -219,6 +140,7 @@ jobs:
               --link mysql-container:mysql \
               --restart always \
               ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
+
             docker image prune -f
 
   notify:
@@ -228,7 +150,7 @@ jobs:
     steps:
       - name: Send notification
         run: |
-          if [ "${{ job.status }}" = "success" ]; then
+          if [ "${{ needs.test.result }}" = "success" ] && [ "${{ needs.deploy.result }}" = "success" ]; then
             echo "Pipeline succeeded!"
           else
             echo "Pipeline failed. Please check the CI/CD logs."
