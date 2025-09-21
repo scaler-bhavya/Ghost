@@ -33,14 +33,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js (match ghost-admin)
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22.13.1
-          cache: yarn
+          node-version: '22.13.1'  # Matches ghost-admin@6.0.8 requirement
+          cache: 'yarn'
+
+      - name: Install Yarn (latest stable)
+        run: npm install -g yarn@3.6.0  # Use a modern Yarn version to avoid dependency issues
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: yarn install --immutable  # Replaces --frozen-lockfile for Yarn 3 compatibility
 
       - name: Set up test environment (nocks)
         run: |
@@ -48,17 +51,14 @@ jobs:
           cat > ghost/core/test/utils/test-setup.js << 'EOF'
           const nock = require('nock');
           nock('http://127.0.0.1:2369').persist().get(/.*/).reply(200, 'Mocked response');
-          nock('http://localhost:2388').persist().get(/.*/).reply(200, 'Mocked response');
+          nock('http://localhost:2368').persist().get(/.*/).reply(200, 'Mocked response');
           nock('http://www.notarealsite.com').persist().get(/.*/).reply(200, 'Mocked response');
           nock('https://api.stripe.com').persist().get(/.*/).reply(200, { id: 'price_1', active: true, unit_amount: 500, currency: 'usd' });
           nock('https://api.mailgun.net').persist().get(/.*/).reply(200, { items: [] });
           nock('https://example.com').persist().get(/.*/).reply(200, { title: 'Mocked OEmbed', type: 'photo', url: 'https://example.com/image.jpg' });
           EOF
 
-      # --------------------------
-      # Pass 1: run all unit tests EXCEPT the config loader spec,
-      # using url=http://127.0.0.1:2369 to satisfy the majority of URL assertions.
-      # --------------------------
+      # Run unit tests excluding specific tests, using sqlite3 and url=http://127.0.0.1:2369
       - name: Run unit tests (sqlite3) — bulk suite
         working-directory: ghost/core
         env:
@@ -76,10 +76,7 @@ jobs:
             --exclude test/unit/server/services/posts/PostsExporter.test.js \
             --exclude test/unit/server/services/recommendations
 
-      # --------------------------
-      # Pass 2: run ONLY the config loader spec with url=http://localhost:2368,
-      # which matches that test's expected value.
-      # --------------------------
+      # Run config loader spec with url=http://localhost:2368
       - name: Run config loader spec (sqlite3) — targeted suite
         working-directory: ghost/core
         env:
@@ -87,7 +84,7 @@ jobs:
           database__client: sqlite3
           url: http://localhost:2368
         run: |
-          ./node_modules/.bin/mocha --reporter dot --require tsx --exit --trace-warnings \
+          yarn mocha --reporter dot --require tsx --exit --trace-warnings \
             --recursive --extension=test.js,test.ts \
             --require ./test/utils/test-setup.js \
             ./test/unit/shared/config/loader.test.js
@@ -127,13 +124,14 @@ jobs:
           script: |
             set -euo pipefail
 
+            # Stop and remove existing containers (ignore errors)
             docker stop ghost-container mysql-container || true
             docker rm ghost-container mysql-container || true
 
-            # Use an isolated network (avoid deprecated --link)
+            # Create Docker network if it doesn't exist
             docker network create ghost-net || true
 
-            # MySQL
+            # Start MySQL container
             docker run -d \
               --name mysql-container \
               --network ghost-net \
@@ -145,9 +143,9 @@ jobs:
               --restart always \
               mysql:8
 
-            # Wait for MySQL
+            # Wait for MySQL to be ready (timeout after 60 seconds)
             for i in {1..30}; do
-              if docker exec mysql-container sh -lc 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent'; then
+              if docker exec mysql-container mysqladmin ping -h 127.0.0.1 -uroot -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" --silent; then
                 echo "MySQL is ready"
                 break
               fi
@@ -155,7 +153,7 @@ jobs:
               sleep 2
             done
 
-            # Ghost
+            # Start Ghost container
             docker run -d \
               --name ghost-container \
               --network ghost-net \
@@ -170,6 +168,7 @@ jobs:
               --restart always \
               ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
 
+            # Clean up unused Docker images
             docker image prune -f || true
 
   notify:
@@ -179,8 +178,9 @@ jobs:
     steps:
       - name: Send notification
         run: |
-          if [ "${{ needs.test.result }}" = "success" ] && { [ "${{ needs.deploy.result }}" = "success" ] || [ "${{ needs.deploy.result }}" = "skipped" ]; }; then
-            echo "Pipeline succeeded!"
+          if [ "${{ needs.test.result }}" = "success" ] && [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "Pipeline succeeded! Ghost CMS deployed successfully."
           else
-            echo "Pipeline failed. Please check the CI/CD logs."
+            echo "Pipeline failed. Check the CI/CD logs for details."
+            exit 1
           fi
