@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - '**.js'
-      - '**.json'
-      - '**.yml'
+      - '**/*.js'
+      - '**/*.json'
+      - '**/*.yml'
+      - '**/*.yaml'
       - 'Dockerfile'
       - 'ghost/core/**'
       - 'package.json'
@@ -14,9 +15,10 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - '**.js'
-      - '**.json'
-      - '**.yml'
+      - '**/*.js'
+      - '**/*.json'
+      - '**/*.yml'
+      - '**/*.yaml'
       - 'Dockerfile'
       - 'ghost/core/**'
       - 'package.json'
@@ -25,9 +27,7 @@ on:
 
 jobs:
   test:
-    # Unit tests use sqlite3 — no MySQL service needed
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -35,10 +35,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
           cache: yarn
 
       - name: Install dependencies
+        # Make sure `nock` exists in devDependencies to keep this strict install working
         run: yarn install --frozen-lockfile
 
       - name: Set up test environment (nocks)
@@ -73,7 +74,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main'
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -90,7 +90,9 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
+            ${{ secrets.DOCKER_USERNAME }}/ghost-cms:${{ github.sha }}
 
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
@@ -100,26 +102,29 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
           script: |
-            echo "[client]" > /tmp/my.cnf
-            echo "user=root" >> /tmp/my.cnf
-            echo "password=${{ secrets.MYSQL_ROOT_PASSWORD }}" >> /tmp/my.cnf
-            chmod 600 /tmp/my.cnf
+            set -euo pipefail
 
             docker stop ghost-container mysql-container || true
             docker rm ghost-container mysql-container || true
 
+            # Create an isolated network instead of legacy --link
+            docker network create ghost-net || true
+
+            # Start MySQL
             docker run -d \
               --name mysql-container \
-              -e MYSQL_ROOT_PASSWORD=${{ secrets.MYSQL_ROOT_PASSWORD }} \
+              --network ghost-net \
+              -e MYSQL_ROOT_PASSWORD='${{ secrets.MYSQL_ROOT_PASSWORD }}' \
               -e MYSQL_DATABASE=ghost_prod \
               -e MYSQL_USER=ghost_user \
-              -e MYSQL_PASSWORD=${{ secrets.MYSQL_PASSWORD }} \
+              -e MYSQL_PASSWORD='${{ secrets.MYSQL_PASSWORD }}' \
               -v mysql_data:/var/lib/mysql \
               --restart always \
               mysql:8
 
+            # Wait for MySQL to be ready (use creds inside the container)
             for i in {1..30}; do
-              if docker exec mysql-container mysqladmin ping --defaults-file=/tmp/my.cnf --silent; then
+              if docker exec mysql-container sh -lc 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent'; then
                 echo "MySQL is ready"
                 break
               fi
@@ -127,21 +132,22 @@ jobs:
               sleep 2
             done
 
+            # Start Ghost (connects to mysql-container by name on the same network)
             docker run -d \
               --name ghost-container \
+              --network ghost-net \
               -p 2368:2368 \
               -e database__client=mysql \
               -e database__connection__host=mysql-container \
               -e database__connection__user=ghost_user \
-              -e database__connection__password=${{ secrets.MYSQL_PASSWORD }} \
+              -e database__connection__password='${{ secrets.MYSQL_PASSWORD }}' \
               -e database__connection__database=ghost_prod \
               -e database__connection__port=3306 \
               -e url=http://${{ secrets.VPS_HOST }}:2368 \
-              --link mysql-container:mysql \
               --restart always \
               ${{ secrets.DOCKER_USERNAME }}/ghost-cms:latest
 
-            docker image prune -f
+            docker image prune -f || true
 
   notify:
     runs-on: ubuntu-latest
@@ -150,7 +156,7 @@ jobs:
     steps:
       - name: Send notification
         run: |
-          if [ "${{ needs.test.result }}" = "success" ] && [ "${{ needs.deploy.result }}" = "success" ]; then
+          if [ "${{ needs.test.result }}" = "success" ] && { [ "${{ needs.deploy.result }}" = "success" ] || [ "${{ needs.deploy.result }}" = "skipped" ]; }; then
             echo "Pipeline succeeded!"
           else
             echo "Pipeline failed. Please check the CI/CD logs."
