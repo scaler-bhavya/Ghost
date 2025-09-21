@@ -28,6 +28,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -54,14 +55,19 @@ jobs:
           nock('https://example.com').persist().get(/.*/).reply(200, { title: 'Mocked OEmbed', type: 'photo', url: 'https://example.com/image.jpg' });
           EOF
 
-      - name: Run unit tests (sqlite3)
+      # --------------------------
+      # Pass 1: run all unit tests EXCEPT the config loader spec,
+      # using url=http://127.0.0.1:2369 to satisfy the majority of URL assertions.
+      # --------------------------
+      - name: Run unit tests (sqlite3) — bulk suite
+        working-directory: ghost/core
         env:
           NODE_ENV: testing
           database__client: sqlite3
-          # Many tests expect 127.0.0.1:2369 (not localhost:2368)
           url: http://127.0.0.1:2369
         run: |
-          cd ghost/core && yarn test:unit --require ./test/utils/test-setup.js \
+          yarn test:unit --require ./test/utils/test-setup.js \
+            --exclude test/unit/shared/config/loader.test.js \
             --exclude test/unit/server/activitypub \
             --exclude test/unit/frontend/helpers/ghost_head.test.js \
             --exclude test/unit/server/services/email-service \
@@ -70,10 +76,27 @@ jobs:
             --exclude test/unit/server/services/posts/PostsExporter.test.js \
             --exclude test/unit/server/services/recommendations
 
+      # --------------------------
+      # Pass 2: run ONLY the config loader spec with url=http://localhost:2368,
+      # which matches that test's expected value.
+      # --------------------------
+      - name: Run config loader spec (sqlite3) — targeted suite
+        working-directory: ghost/core
+        env:
+          NODE_ENV: testing
+          database__client: sqlite3
+          url: http://localhost:2368
+        run: |
+          ./node_modules/.bin/mocha --reporter dot --require tsx --exit --trace-warnings \
+            --recursive --extension=test.js,test.ts \
+            --require ./test/utils/test-setup.js \
+            ./test/unit/shared/config/loader.test.js
+
   deploy:
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -107,8 +130,10 @@ jobs:
             docker stop ghost-container mysql-container || true
             docker rm ghost-container mysql-container || true
 
+            # Use an isolated network (avoid deprecated --link)
             docker network create ghost-net || true
 
+            # MySQL
             docker run -d \
               --name mysql-container \
               --network ghost-net \
@@ -120,6 +145,7 @@ jobs:
               --restart always \
               mysql:8
 
+            # Wait for MySQL
             for i in {1..30}; do
               if docker exec mysql-container sh -lc 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent'; then
                 echo "MySQL is ready"
@@ -129,6 +155,7 @@ jobs:
               sleep 2
             done
 
+            # Ghost
             docker run -d \
               --name ghost-container \
               --network ghost-net \
